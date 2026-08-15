@@ -183,6 +183,7 @@ UPROGS=\
 	_zombie\
 	_mytest\
 	_mygrep\
+	_syscall_trace\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

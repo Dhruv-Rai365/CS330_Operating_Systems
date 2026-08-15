@@ -89,3 +89,17 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+//this is the new api for the syscall_trace
+int
+sys_trace(void)
+{
+  int enabled;
+
+  if(argint(0, &enabled) < 0)
+    return -1;
+
+  myproc()->trace_enabled = enabled ? 1 : 0;
+
+  return 0;
+}
