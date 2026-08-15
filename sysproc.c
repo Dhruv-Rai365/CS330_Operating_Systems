@@ -103,3 +103,31 @@ sys_trace(void)
 
   return 0;
 }
+
+/*
+ * setprio(priority)
+ *
+ * Set the calling process's scheduler priority.
+ */
+int
+sys_setprio(void)
+{
+  int priority;
+
+  if(argint(0, &priority) < 0)
+    return -1;
+
+  return setprio(priority);
+}
+
+
+/*
+ * getprio()
+ *
+ * Return the calling process's current priority.
+ */
+int
+sys_getprio(void)
+{
+  return getprio();
+}

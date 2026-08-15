@@ -24,6 +24,8 @@ char* sbrk(int);
 int sleep(int);
 int uptime(void);
 int trace(int);
+int setprio(int);
+int getprio(void);
 
 // ulib.c
 int stat(const char*, struct stat*);

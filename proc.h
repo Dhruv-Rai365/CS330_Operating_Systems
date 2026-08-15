@@ -34,6 +34,16 @@ struct context {
 
 enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 
+/*
+ * Scheduler priority configuration.
+ *
+ * Higher numerical priority means a larger CPU share.
+ * We keep the range small because the weighted scheduler
+ * performs at most MAX_PRIORITY scheduling rounds.
+ */
+#define DEFAULT_PRIORITY 1
+#define MAX_PRIORITY     10
+
 // Per-process state
 struct proc {
   uint sz;                     // Size of process memory (bytes)
@@ -47,6 +57,7 @@ struct proc {
   void *chan;                  // If non-zero, sleeping on chan
   int killed;                  // If non-zero, have been killed	
   int trace_enabled;           // 1 when syscall tracing is enabled
+  int priority;                // CPU scheduling weight
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)

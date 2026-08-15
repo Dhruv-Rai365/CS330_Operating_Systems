@@ -89,6 +89,7 @@ found:
   p->state = EMBRYO;
   p->pid = nextpid++;
   p->trace_enabled = 0;
+  p->priority = DEFAULT_PRIORITY;
 
   release(&ptable.lock);
 
@@ -202,6 +203,8 @@ fork(void)
   *np->tf = *curproc->tf;
 
   np->trace_enabled = curproc->trace_enabled;
+
+  np->priority = curproc->priority;
   // Clear %eax so that fork returns 0 in the child.
   np->tf->eax = 0;
 
@@ -313,6 +316,173 @@ wait(void)
   }
 }
 
+/*
+ * Change the scheduling priority of the current process.
+ *
+ * Priority is used as the weight in our weighted
+ * round-robin scheduler.
+ */
+int
+setprio(int priority)
+{
+  struct proc *p;
+
+  if(priority < 1 || priority > MAX_PRIORITY)
+    return -1;
+
+  p = myproc();
+
+  /*
+   * priority is scheduler-visible process-table state,
+   * so protect the update with ptable.lock.
+   */
+  acquire(&ptable.lock);
+  p->priority = priority;
+  release(&ptable.lock);
+
+  return 0;
+}
+
+
+/*
+ * Return the current process's scheduling priority.
+ */
+int
+getprio(void)
+{
+  struct proc *p;
+  int priority;
+
+  p = myproc();
+
+  acquire(&ptable.lock);
+  priority = p->priority;
+  release(&ptable.lock);
+
+  return priority;
+}
+
+
+/*
+ * Weighted Round-Robin scheduler.
+ *
+ * A process's priority is treated as its scheduling weight.
+ *
+ * Example:
+ *
+ *   P1 priority = 1
+ *   P2 priority = 2
+ *   P3 priority = 4
+ *
+ * One weighted cycle conceptually looks like:
+ *
+ *   Round 0: P1 P2 P3
+ *   Round 1:    P2 P3
+ *   Round 2:       P3
+ *   Round 3:       P3
+ *
+ * Therefore, while all three remain CPU-bound:
+ *
+ *   P1 gets 1 scheduling opportunity
+ *   P2 gets 2 scheduling opportunities
+ *   P3 gets 4 scheduling opportunities
+ *
+ * Every runnable process with priority >= 1 participates
+ * in round 0, which prevents complete starvation.
+ */
+void
+scheduler(void)
+{
+  struct proc *p;
+  struct cpu *c;
+  int round;
+  int ran_process;
+
+  c = mycpu();
+  c->proc = 0;
+
+  for(;;){
+
+    /*
+     * Enable interrupts on this CPU.
+     */
+    sti();
+
+    /*
+     * Each pass represents one level of the weighted round.
+     *
+     * A process participates while:
+     *
+     *      priority > round
+     *
+     * Therefore priority N receives N opportunities.
+     */
+    for(round = 0; round < MAX_PRIORITY; round++){
+
+      ran_process = 0;
+
+      /*
+       * ptable state must be protected while selecting
+       * and changing process states.
+       */
+      acquire(&ptable.lock);
+
+      for(p = ptable.proc;
+          p < &ptable.proc[NPROC];
+          p++){
+
+        /*
+         * Only runnable processes can be scheduled.
+         */
+        if(p->state != RUNNABLE)
+          continue;
+
+        /*
+         * This is the weighting rule.
+         *
+         * Priority 1 participates only in round 0.
+         * Priority 4 participates in rounds 0,1,2,3.
+         */
+        if(p->priority <= round)
+          continue;
+
+        ran_process = 1;
+
+        /*
+         * Switch to the selected process.
+         */
+        c->proc = p;
+        switchuvm(p);
+
+        p->state = RUNNING;
+
+        swtch(&(c->scheduler), p->context);
+
+        /*
+         * The process eventually yields, sleeps, exits,
+         * or is preempted and switches back here.
+         */
+        switchkvm();
+
+        c->proc = 0;
+      }
+
+      release(&ptable.lock);
+
+      /*
+       * If nobody qualified for this weight level,
+       * there cannot be a process with a still-higher
+       * priority currently runnable, so restart the
+       * weighted cycle.
+       */
+      if(!ran_process)
+        break;
+    }
+  }
+}
+
+
+/*
 //PAGEBREAK: 42
 // Per-CPU process scheduler.
 // Each CPU calls scheduler() after setting itself up.
@@ -356,6 +526,8 @@ scheduler(void)
 
   }
 }
+*/
+
 
 // Enter scheduler.  Must hold only ptable.lock
 // and have changed proc->state. Saves and restores
