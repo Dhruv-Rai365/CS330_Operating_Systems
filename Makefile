@@ -184,6 +184,7 @@ UPROGS=\
 	_mytest\
 	_mygrep\
 	_syscall_trace\
+	_mysh\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)
