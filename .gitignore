@@ -1,0 +1,10 @@
+*.o
+*.d
+*.asm
+*.sym
+*.img
+*.out
+*.log
+kernel
+mkfs
+_* 
