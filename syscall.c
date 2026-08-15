@@ -106,7 +106,12 @@ extern int sys_uptime(void);
 extern int sys_trace(void);
 extern int sys_setprio(void);
 extern int sys_getprio(void);
-
+extern int sys_mmap(void);
+extern int sys_munmap(void);
+extern int sys_mprotect(void);
+extern int sys_numvp(void);
+extern int sys_numpp(void);
+extern int sys_getptsize(void);
 
 static int (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -133,6 +138,12 @@ static int (*syscalls[])(void) = {
 [SYS_trace]   sys_trace,
 [SYS_setprio] sys_setprio,
 [SYS_getprio] sys_getprio,
+[SYS_mmap]      sys_mmap,
+[SYS_munmap]    sys_munmap,
+[SYS_mprotect]  sys_mprotect,
+[SYS_numvp]       sys_numvp,
+[SYS_numpp]       sys_numpp,
+[SYS_getptsize]   sys_getptsize,
 };
 
 static char *syscall_names[] = {
@@ -160,6 +171,12 @@ static char *syscall_names[] = {
   [SYS_trace]   "trace",
   [SYS_setprio] "setprio",
   [SYS_getprio] "getprio",
+  [SYS_mmap]      "mmap",
+  [SYS_munmap]    "munmap",
+  [SYS_mprotect]  "mprotect",
+  [SYS_numvp]       "numvp",
+  [SYS_numpp]       "numpp",
+  [SYS_getptsize]   "getptsize"
 };
 
 void

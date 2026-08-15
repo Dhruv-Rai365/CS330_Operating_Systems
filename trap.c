@@ -56,6 +56,88 @@ trap(struct trapframe *tf)
     }
     lapiceoi();
     break;
+  case T_PGFLT:
+  {
+    uint faultva;
+    uint pageva;
+    struct proc *p;
+    struct vma *v;
+
+    /*
+     * CR2 contains the virtual address that caused
+     * the x86 page fault.
+     */
+    faultva = rcr2();
+    pageva = PGROUNDDOWN(faultva);
+    p = myproc();
+
+    if(p == 0){
+      cprintf("page fault without process at 0x%x\n", faultva);
+      panic("page fault");
+    }
+
+    /*
+     * The fault is valid only if the address was previously
+     * reserved by mmap().
+     */
+    v = vma_find(p, faultva);
+
+    if(v == 0){
+      /*
+       * Preserve xv6's normal behaviour for genuine kernel
+       * faults.  Invalid user accesses simply kill the process.
+       */
+      if((tf->cs & 3) == 0){
+        cprintf("kernel page fault at 0x%x\n", faultva);
+        panic("page fault");
+      }
+
+      cprintf("pid %d: invalid memory access at 0x%x\n",
+              p->pid, faultva);
+
+      p->killed = 1;
+      break;
+    }
+
+    /*
+     * Error-code bit 0 == 1 means the page was already present.
+     * Therefore this is a protection fault rather than a
+     * demand-allocation fault.
+     *
+     * Later, Copy-on-Write will make use of this distinction.
+     */
+    if(tf->err & 0x1){
+      cprintf("pid %d: protection fault at 0x%x\n",
+              p->pid, faultva);
+
+      p->killed = 1;
+      break;
+    }
+
+    /*
+     * Error-code bit 1 == 1 means the faulting access was a write.
+     * A write must not create a page inside a read-only VMA.
+     */
+    if((tf->err & 0x2) && !(v->prot & PROT_WRITE)){
+      cprintf("pid %d: write to read-only mapping at 0x%x\n",
+              p->pid, faultva);
+
+      p->killed = 1;
+      break;
+    }
+
+    /*
+     * Valid non-present mmap page:
+     * allocate one zero-filled physical page and install its PTE.
+     */
+    if(vm_alloc_mmap_page(p->pgdir, pageva, v->prot) < 0){
+      cprintf("pid %d: mmap page allocation failed\n", p->pid);
+      p->killed = 1;
+      break;
+    }
+
+    break;
+  }
   case T_IRQ0 + IRQ_IDE:
     ideintr();
     lapiceoi();

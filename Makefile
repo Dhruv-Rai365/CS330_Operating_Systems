@@ -187,6 +187,7 @@ UPROGS=\
 	_mysh\
 	_sched_test\
 	_sched_bench\
+	_mmap_test\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

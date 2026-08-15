@@ -1,3 +1,5 @@
+#include "mmap.h"
+
 // Per-CPU state
 struct cpu {
   uchar apicid;                // Local APIC ID
@@ -44,6 +46,21 @@ enum procstate { UNUSED, EMBRYO, SLEEPING, RUNNABLE, RUNNING, ZOMBIE };
 #define DEFAULT_PRIORITY 1
 #define MAX_PRIORITY     10
 
+// A simplified Virtual Memory Area.
+//
+// A VMA says that the process owns the virtual-address interval
+//
+//     [start, start + length)
+//
+// Physical pages do NOT have to exist for every address in this
+// interval.  They will be allocated lazily on page faults.
+struct vma {
+  uint start;       // First virtual address in mapping
+  uint length;      // Mapping size in bytes, page aligned
+  int prot;         // PROT_READ / PROT_WRITE
+  int used;         // 1 if this VMA slot is active
+};
+
 // Per-process state
 struct proc {
   uint sz;                     // Size of process memory (bytes)
@@ -61,6 +78,7 @@ struct proc {
   struct file *ofile[NOFILE];  // Open files
   struct inode *cwd;           // Current directory
   char name[16];               // Process name (debugging)
+  struct vma vmas[MAX_VMAS];
 };
 
 // Process memory is laid out contiguously, low addresses first:

@@ -97,6 +97,10 @@ exec(char *path, char **argv)
   oldpgdir = curproc->pgdir;
   curproc->pgdir = pgdir;
   curproc->sz = sz;
+  
+  // exec() replaces the complete old address space.
+  memset(curproc->vmas, 0, sizeof(curproc->vmas));
+  
   curproc->tf->eip = elf.entry;  // main
   curproc->tf->esp = sp;
   switchuvm(curproc);

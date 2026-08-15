@@ -79,6 +79,260 @@ mappages(pde_t *pgdir, void *va, uint size, uint pa, int perm)
   return 0;
 }
 
+
+
+/*
+ * Allocate one physical page for a lazily mapped virtual page.
+ *
+ * mmap() itself does not call this function.  This is called
+ * only after the CPU faults on a valid mmap address.
+ */
+int
+vm_alloc_mmap_page(pde_t *pgdir, uint va, int prot)
+{
+  char *mem;
+  int perm;
+
+  va = PGROUNDDOWN(va);
+
+  mem = kalloc();
+  if(mem == 0)
+    return -1;
+
+  // Anonymous mappings must initially contain zeroes.
+  memset(mem, 0, PGSIZE);
+
+  // Every mapped page is user accessible.
+  // PTE_W is added only for writable VMAs.
+  perm = PTE_U;
+
+  if(prot & PROT_WRITE)
+    perm |= PTE_W;
+
+  if(mappages(pgdir,
+              (void*)va,
+              PGSIZE,
+              V2P(mem),
+              perm) < 0){
+    kfree(mem);
+    return -1;
+  }
+
+  /*
+   * Reload CR3 so the processor observes the new translation.
+   * This also flushes stale TLB state for this address space.
+   */
+  lcr3(V2P(pgdir));
+
+  return 0;
+}
+
+
+/*
+ * Change permissions on all currently resident pages in a VMA.
+ *
+ * Lazy pages with no PTE yet are skipped.  Their permissions
+ * will be taken from the VMA when they are faulted in later.
+ */
+int
+vm_protect_range(pde_t *pgdir, uint start, uint length, int prot)
+{
+  uint a;
+  uint end;
+  pte_t *pte;
+
+  end = start + length;
+
+  for(a = start; a < end; a += PGSIZE){
+    pte = walkpgdir(pgdir, (void*)a, 0);
+
+    // This page may still be lazy and therefore have no PTE.
+    if(pte == 0 || !(*pte & PTE_P))
+      continue;
+
+    if(prot & PROT_WRITE)
+      *pte |= PTE_W;
+    else
+      *pte &= ~PTE_W;
+  }
+
+  // Flush old cached permissions.
+  lcr3(V2P(pgdir));
+
+  return 0;
+}
+
+
+/*
+ * Remove all resident pages from an mmap region.
+ *
+ * Untouched lazy pages have nothing to free.
+ */
+int
+vm_unmap_range(pde_t *pgdir, uint start, uint length)
+{
+  uint a;
+  uint end;
+  uint pa;
+  pte_t *pte;
+
+  end = start + length;
+
+  for(a = start; a < end; a += PGSIZE){
+    pte = walkpgdir(pgdir, (void*)a, 0);
+
+    if(pte == 0 || !(*pte & PTE_P))
+      continue;
+
+    pa = PTE_ADDR(*pte);
+
+    if(pa == 0)
+      panic("vm_unmap_range");
+
+    // Return the physical data page to xv6's allocator.
+    kfree((char*)P2V(pa));
+
+    // The virtual address is no longer mapped.
+    *pte = 0;
+  }
+
+  // Remove stale cached translations.
+  lcr3(V2P(pgdir));
+
+  return 0;
+}
+
+/*
+ * Return the number of virtual pages logically owned by
+ * the current process.
+ *
+ * A page counts as virtual if:
+ *
+ *   1. it belongs to an active mmap VMA, even if it has
+ *      not received physical memory yet, OR
+ *
+ *   2. it has an ordinary present mapping in the process
+ *      page table.
+ *
+ * This is intentionally NOT just p->sz / PGSIZE because
+ * munmap() can leave holes below p->sz.
+ */
+int
+vm_numvp(struct proc *p)
+{
+  uint a;
+  uint limit;
+  int count;
+  pte_t *pte;
+
+  if(p == 0 || p->pgdir == 0)
+    return 0;
+
+  count = 0;
+  limit = PGROUNDUP(p->sz);
+
+  for(a = 0; a < limit; a += PGSIZE){
+
+    /*
+     * A VMA owns this virtual page even when there is
+     * no physical page/PTE yet.
+     */
+    if(vma_find(p, a) != 0){
+      count++;
+      continue;
+    }
+
+    /*
+     * Otherwise count an ordinary xv6 page only if a
+     * physical mapping actually exists.
+     *
+     * This also avoids counting holes left by munmap().
+     */
+    pte = walkpgdir(p->pgdir, (void*)a, 0);
+
+    if(pte != 0 && (*pte & PTE_P))
+      count++;
+  }
+
+  return count;
+}
+
+
+/*
+ * Count user-address-space pages that currently have
+ * real physical memory backing them.
+ *
+ * Lazy mmap pages do not count until their page fault
+ * causes a physical page to be allocated.
+ */
+int
+vm_numpp(struct proc *p)
+{
+  uint a;
+  uint limit;
+  int count;
+  pte_t *pte;
+
+  if(p == 0 || p->pgdir == 0)
+    return 0;
+
+  count = 0;
+  limit = PGROUNDUP(p->sz);
+
+  for(a = 0; a < limit; a += PGSIZE){
+    pte = walkpgdir(p->pgdir, (void*)a, 0);
+
+    if(pte != 0 && (*pte & PTE_P))
+      count++;
+  }
+
+  return count;
+}
+
+
+/*
+ * Return the number of 4 KB pages used by this process's
+ * user-side page-table hierarchy.
+ *
+ * xv6-x86 uses two-level paging:
+ *
+ *      page directory
+ *            |
+ *            +---- page table
+ *            +---- page table
+ *            +---- ...
+ *
+ * The page directory itself consumes one physical page.
+ * Every present user-space PDE points to another 4 KB
+ * page-table page.
+ *
+ * Kernel mappings are deliberately excluded here because
+ * every process receives the same kernel-side mappings.
+ */
+int
+vm_getptsize(struct proc *p)
+{
+  uint i;
+  int pages;
+
+  if(p == 0 || p->pgdir == 0)
+    return 0;
+
+  // The page directory itself occupies one 4 KB page.
+  pages = 1;
+
+  /*
+   * Only inspect PDEs below KERNBASE.
+   * PDX(KERNBASE) is the first kernel-space PDE.
+   */
+  for(i = 0; i < PDX(KERNBASE); i++){
+    if(p->pgdir[i] & PTE_P)
+      pages++;
+  }
+
+  return pages;
+}
+
 // There is one page table per process, plus one that's used when
 // a CPU is not running any process (kpgdir). The kernel uses the
 // current process's page table during system calls and interrupts;
@@ -323,10 +577,14 @@ copyuvm(pde_t *pgdir, uint sz)
   if((d = setupkvm()) == 0)
     return 0;
   for(i = 0; i < sz; i += PGSIZE){
+  /*
+   * Demand-paged mmap regions intentionally contain holes.
+   * An untouched page must remain absent in the child too.
+   */
     if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
-      panic("copyuvm: pte should exist");
+      continue;
     if(!(*pte & PTE_P))
-      panic("copyuvm: page not present");
+      continue;
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
     if((mem = kalloc()) == 0)

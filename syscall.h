@@ -23,3 +23,9 @@
 #define SYS_trace  22
 #define SYS_setprio 23
 #define SYS_getprio 24
+#define SYS_mmap      25
+#define SYS_munmap    26
+#define SYS_mprotect  27
+#define SYS_numvp       28
+#define SYS_numpp       29
+#define SYS_getptsize   30

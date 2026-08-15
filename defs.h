@@ -4,6 +4,7 @@ struct file;
 struct inode;
 struct pipe;
 struct proc;
+struct vma;
 struct rtcdate;
 struct spinlock;
 struct sleeplock;
@@ -112,6 +113,8 @@ int             setprio(int);
 int             getprio(void);
 struct cpu*     mycpu(void);
 struct proc*    myproc();
+struct vma*     vma_find(struct proc*, uint);
+struct vma*     vma_find_exact(struct proc*, uint, uint);
 void            pinit(void);
 void            procdump(void);
 void            scheduler(void) __attribute__((noreturn));
@@ -178,6 +181,15 @@ void            kvmalloc(void);
 pde_t*          setupkvm(void);
 char*           uva2ka(pde_t*, char*);
 int             allocuvm(pde_t*, uint, uint);
+
+int             vm_alloc_mmap_page(pde_t*, uint, int);
+int             vm_protect_range(pde_t*, uint, uint, int);
+int             vm_unmap_range(pde_t*, uint, uint);
+
+int             vm_numvp(struct proc*);
+int             vm_numpp(struct proc*);
+int             vm_getptsize(struct proc*);
+
 int             deallocuvm(pde_t*, uint, uint);
 void            freevm(pde_t*);
 void            inituvm(pde_t*, char*, uint);

@@ -65,6 +65,53 @@ myproc(void) {
   return p;
 }
 
+
+/*
+ * Find the VMA containing a virtual address.
+ *
+ * We use subtraction instead of addr < start + length
+ * so that the check remains safe from integer overflow.
+ */
+struct vma*
+vma_find(struct proc *p, uint addr)
+{
+  int i;
+
+  for(i = 0; i < MAX_VMAS; i++){
+    if(!p->vmas[i].used)
+      continue;
+
+    if(addr >= p->vmas[i].start &&
+       addr - p->vmas[i].start < p->vmas[i].length)
+      return &p->vmas[i];
+  }
+
+  return 0;
+}
+
+
+/*
+ * Find the exact mapping created by mmap().
+ *
+ * Our simplified munmap() and mprotect() initially operate
+ * on a complete mmap region rather than splitting VMAs.
+ */
+struct vma*
+vma_find_exact(struct proc *p, uint addr, uint length)
+{
+  int i;
+
+  for(i = 0; i < MAX_VMAS; i++){
+    if(p->vmas[i].used &&
+       p->vmas[i].start == addr &&
+       p->vmas[i].length == length)
+      return &p->vmas[i];
+  }
+
+  return 0;
+}
+
+
 //PAGEBREAK: 32
 // Look in the process table for an UNUSED proc.
 // If found, change state to EMBRYO and initialize
@@ -89,6 +136,9 @@ found:
   p->state = EMBRYO;
   p->pid = nextpid++;
   p->trace_enabled = 0;
+  // Start every new process with no mmap regions.
+  memset(p->vmas, 0, sizeof(p->vmas));
+  
   p->priority = DEFAULT_PRIORITY;
 
   release(&ptable.lock);
@@ -199,6 +249,10 @@ fork(void)
     return -1;
   }
   np->sz = curproc->sz;
+  // Child inherits all mmap region descriptions.
+  for(i = 0; i < MAX_VMAS; i++)
+    np->vmas[i] = curproc->vmas[i];
+  
   np->parent = curproc;
   *np->tf = *curproc->tf;
 
