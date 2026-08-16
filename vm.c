@@ -150,11 +150,42 @@ vm_protect_range(pde_t *pgdir, uint start, uint length, int prot)
     if(pte == 0 || !(*pte & PTE_P))
       continue;
 
-    if(prot & PROT_WRITE)
-      *pte |= PTE_W;
-    else
-      *pte &= ~PTE_W;
-  }
+    /*
+     * If a physical frame is still shared, making this process
+     * directly writable would destroy normal fork isolation.
+     *
+     * Therefore a shared page must remain read-only and COW
+     * until the process actually writes to it.
+     */
+     if(prot & PROT_WRITE){
+
+       if((*pte & PTE_COW) ||
+       kref_get(PTE_ADDR(*pte)) > 1){
+
+       *pte &= ~PTE_W;
+       *pte |= PTE_COW;
+
+       } else {
+
+       /*
+        * This process is the sole owner, so normal write
+        * permission can be restored immediately.
+        */
+       *pte |= PTE_W;
+       }
+
+    } else {
+
+      /*
+       * Genuine read-only protection.
+       *
+       * We do NOT clear PTE_COW here.  If this page was already
+       * shared because of fork(), it remains shared.  trap.c will
+       * consult the VMA protection before allowing COW resolution.
+       */
+       *pte &= ~PTE_W;
+      }
+ }
 
   // Flush old cached permissions.
   lcr3(V2P(pgdir));
@@ -201,6 +232,121 @@ vm_unmap_range(pde_t *pgdir, uint start, uint length)
 
   return 0;
 }
+
+
+/*
+ * Resolve a Copy-on-Write write fault.
+ *
+ * Return values:
+ *
+ *   1  -> this was a COW page and the fault was resolved
+ *   0  -> the address is not a valid COW mapping
+ *  -1  -> it was COW, but allocation failed
+ */
+int
+cow_fault(pde_t *pgdir, uint va)
+{
+  pte_t *pte;
+  uint pa;
+  uint flags;
+  int refs;
+  char *mem;
+
+  va = PGROUNDDOWN(va);
+
+  /*
+   * Locate the actual PTE responsible for this virtual page.
+   */
+  pte = walkpgdir(pgdir, (void*)va, 0);
+
+  if(pte == 0)
+    return 0;
+
+  if(!(*pte & PTE_P))
+    return 0;
+
+  /*
+   * A read-only page is NOT automatically a COW page.
+   *
+   * This check is what distinguishes COW from a genuine
+   * mprotect(PROT_READ) mapping.
+   */
+  if(!(*pte & PTE_COW))
+    return 0;
+
+  pa = PTE_ADDR(*pte);
+  flags = PTE_FLAGS(*pte);
+
+  refs = kref_get(pa);
+
+  if(refs < 1)
+    panic("cow refcount");
+
+
+  /*
+   * Optimization:
+   *
+   * If this process is already the final owner of the frame,
+   * copying the page would achieve nothing.
+   *
+   * Simply convert the existing PTE back into an ordinary
+   * writable mapping.
+   */
+  if(refs == 1){
+    flags |= PTE_W;
+    flags &= ~PTE_COW;
+
+    *pte = pa | flags;
+
+    /*
+     * Flush cached translations so the CPU observes that
+     * this page is writable again.
+     */
+    lcr3(V2P(pgdir));
+
+    return 1;
+  }
+
+
+  /*
+   * More than one process still shares the old frame.
+   *
+   * Allocate a private page for the faulting process.
+   */
+  mem = kalloc();
+
+  if(mem == 0)
+    return -1;
+
+  /*
+   * Clone the complete 4 KB contents.
+   */
+  memmove(mem, (char*)P2V(pa), PGSIZE);
+
+  /*
+   * The new private mapping is writable and is no longer COW.
+   */
+  flags |= PTE_W;
+  flags &= ~PTE_COW;
+
+  *pte = V2P(mem) | flags;
+
+  /*
+   * This process no longer owns the old frame.
+   *
+   * kfree() now means "drop one reference"; it only returns
+   * the old frame to the allocator if its count reaches zero.
+   */
+  kfree((char*)P2V(pa));
+
+  /*
+   * Remove the stale read-only translation from the TLB.
+   */
+  lcr3(V2P(pgdir));
+
+  return 1;
+}
+
 
 /*
  * Return the number of virtual pages logically owned by
@@ -332,6 +478,44 @@ vm_getptsize(struct proc *p)
 
   return pages;
 }
+
+
+/*
+ * Return the reference count of the physical frame backing
+ * one user virtual address.
+ *
+ * This exists purely as a diagnostic interface for validating
+ * Copy-on-Write behaviour.
+ *
+ * Return:
+ *
+ *   >= 1 : current frame reference count
+ *     -1 : virtual address is not presently mapped
+ */
+int
+vm_pageref(pde_t *pgdir, uint va)
+{
+  pte_t *pte;
+  uint pa;
+
+  va = PGROUNDDOWN(va);
+
+  pte = walkpgdir(pgdir, (void*)va, 0);
+
+  if(pte == 0)
+    return -1;
+
+  if(!(*pte & PTE_P))
+    return -1;
+
+  if(!(*pte & PTE_U))
+    return -1;
+
+  pa = PTE_ADDR(*pte);
+
+  return kref_get(pa);
+}
+
 
 // There is one page table per process, plus one that's used when
 // a CPU is not running any process (kpgdir). The kernel uses the
@@ -564,43 +748,124 @@ clearpteu(pde_t *pgdir, char *uva)
   *pte &= ~PTE_U;
 }
 
-// Given a parent process's page table, create a copy
-// of it for a child.
+
+/*
+ * Create a child address space using Copy-on-Write.
+ *
+ * Resident physical pages are shared instead of copied.
+ *
+ * Writable pages are changed into read-only COW mappings in
+ * both parent and child.  Pages that are already genuinely
+ * read-only may simply be shared read-only.
+ *
+ * Lazy mmap pages remain absent in the child.
+ */
 pde_t*
 copyuvm(pde_t *pgdir, uint sz)
 {
   pde_t *d;
   pte_t *pte;
-  uint pa, i, flags;
-  char *mem;
+  uint pa;
+  uint i;
+  uint flags;
 
   if((d = setupkvm()) == 0)
     return 0;
+
   for(i = 0; i < sz; i += PGSIZE){
-  /*
-   * Demand-paged mmap regions intentionally contain holes.
-   * An untouched page must remain absent in the child too.
-   */
-    if((pte = walkpgdir(pgdir, (void *) i, 0)) == 0)
+
+    /*
+     * Demand-paged mmap regions can legitimately contain
+     * addresses with no PTE/page-table entry yet.
+     */
+    if((pte = walkpgdir(pgdir, (void*)i, 0)) == 0)
       continue;
+
+    /*
+     * An untouched lazy mmap page has no physical frame yet.
+     * Leave it absent in the child too.
+     */
     if(!(*pte & PTE_P))
       continue;
+
     pa = PTE_ADDR(*pte);
     flags = PTE_FLAGS(*pte);
-    if((mem = kalloc()) == 0)
-      goto bad;
-    memmove(mem, (char*)P2V(pa), PGSIZE);
-    if(mappages(d, (void*)i, PGSIZE, V2P(mem), flags) < 0) {
-      kfree(mem);
-      goto bad;
+
+    /*
+     * If the page was writable, sharing it directly would let
+     * parent and child modify each other's memory.
+     *
+     * Instead:
+     *
+     *     clear PTE_W
+     *     set PTE_COW
+     *
+     * in the parent.
+     *
+     * Pages already marked COW remain COW when a process forks
+     * again.
+     */
+    if((flags & PTE_W) || (flags & PTE_COW)){
+      flags &= ~PTE_W;
+      flags |= PTE_COW;
+
+      *pte = pa | flags;
     }
+
+    /*
+     * Map the SAME physical frame into the child.
+     *
+     * Notice there is deliberately:
+     *
+     *     no kalloc()
+     *     no memmove()
+     *
+     * here.
+     */
+    if(mappages(d,
+                (void*)i,
+                PGSIZE,
+                pa,
+                flags) < 0)
+      goto bad;
+
+    /*
+     * One additional page table now refers to this physical
+     * frame, so increase its ownership count.
+     *
+     * We increment even genuinely read-only shared pages so
+     * that either process can exit safely.
+     */
+    kref_inc(pa);
   }
+
+  /*
+   * Parent PTEs may have changed from writable to COW/read-only.
+   * Flush its stale TLB entries before returning to user mode.
+   */
+  lcr3(V2P(pgdir));
+
   return d;
 
+
 bad:
+  /*
+   * freevm(d) calls kfree() for every child mapping that was
+   * installed successfully.  Because kfree() is refcount-aware,
+   * those calls simply undo the references added above.
+   */
   freevm(d);
+
+  /*
+   * Some parent PTEs may already have been converted to COW.
+   * That is still safe: their refcount may be one, and the first
+   * future write will simply restore PTE_W without copying.
+   */
+  lcr3(V2P(pgdir));
+
   return 0;
 }
+
 
 //PAGEBREAK!
 // Map user virtual address to kernel address.
@@ -620,28 +885,136 @@ uva2ka(pde_t *pgdir, char *uva)
 // Copy len bytes from p to user address va in page table pgdir.
 // Most useful when pgdir is not the current page table.
 // uva2ka ensures this only works for PTE_U pages.
+
+/*
+ * Copy data from kernel memory into user virtual memory.
+ *
+ * COW complication:
+ *
+ * A page may be:
+ *
+ *   1. writable normally,
+ *   2. read-only because it is Copy-on-Write,
+ *   3. genuinely read-only because of mprotect(),
+ *   4. still lazy and therefore not physically allocated.
+ *
+ * copyout() must preserve all of those semantics.
+ */
 int
 copyout(pde_t *pgdir, uint va, void *p, uint len)
 {
-  char *buf, *pa0;
-  uint n, va0;
+  char *buf;
+  char *pa0;
+  uint n;
+  uint va0;
+  pte_t *pte;
+  struct proc *cur;
+  struct vma *v;
+  int result;
 
   buf = (char*)p;
+
   while(len > 0){
+
+    /*
+     * Handle one destination virtual page at a time.
+     */
     va0 = (uint)PGROUNDDOWN(va);
+
+    /*
+     * VMA metadata belongs to the currently running process.
+     *
+     * copyout() is also used while exec() is constructing a new
+     * address space, so only consult VMA metadata when pgdir is
+     * actually the current process's page table.
+     */
+    cur = myproc();
+    v = 0;
+
+    if(cur != 0 && cur->pgdir == pgdir)
+      v = vma_find(cur, va0);
+
+    pte = walkpgdir(pgdir, (void*)va0, 0);
+
+    /*
+     * If this is an untouched lazy mmap page, kernel output to
+     * the page should fault it in just like a normal user write.
+     */
+    if(pte == 0 || !(*pte & PTE_P)){
+
+      if(v == 0)
+        return -1;
+
+      /*
+       * Kernel writes must not bypass mprotect(PROT_READ).
+       */
+      if(!(v->prot & PROT_WRITE))
+        return -1;
+
+      if(vm_alloc_mmap_page(pgdir, va0, v->prot) < 0)
+        return -1;
+
+      pte = walkpgdir(pgdir, (void*)va0, 0);
+
+      if(pte == 0 || !(*pte & PTE_P))
+        return -1;
+    }
+
+    /*
+     * Even if the PTE still carries PTE_COW, an explicitly
+     * read-only VMA must remain read-only.
+     */
+    if(v != 0 && !(v->prot & PROT_WRITE))
+      return -1;
+
+    /*
+     * Kernel writes to a COW mapping must first create the
+     * process's private page.
+     */
+    if(*pte & PTE_COW){
+
+      result = cow_fault(pgdir, va0);
+
+      if(result <= 0)
+        return -1;
+
+      /*
+       * cow_fault() may have replaced the mapping, so fetch
+       * the PTE again.
+       */
+      pte = walkpgdir(pgdir, (void*)va0, 0);
+    }
+
+    /*
+     * At this point the destination must be a normal writable
+     * user page.
+     */
+    if(pte == 0 ||
+       !(*pte & PTE_P) ||
+       !(*pte & PTE_U) ||
+       !(*pte & PTE_W))
+      return -1;
+
     pa0 = uva2ka(pgdir, (char*)va0);
+
     if(pa0 == 0)
       return -1;
+
     n = PGSIZE - (va - va0);
+
     if(n > len)
       n = len;
+
     memmove(pa0 + (va - va0), buf, n);
+
     len -= n;
     buf += n;
     va = va0 + PGSIZE;
   }
+
   return 0;
 }
+
 
 //PAGEBREAK!
 // Blank page.

@@ -67,6 +67,8 @@ void            ioapicinit(void);
 // kalloc.c
 char*           kalloc(void);
 void            kfree(char*);
+void            kref_inc(uint);
+int             kref_get(uint);
 void            kinit1(void*, void*);
 void            kinit2(void*, void*);
 
@@ -185,10 +187,12 @@ int             allocuvm(pde_t*, uint, uint);
 int             vm_alloc_mmap_page(pde_t*, uint, int);
 int             vm_protect_range(pde_t*, uint, uint, int);
 int             vm_unmap_range(pde_t*, uint, uint);
+int             cow_fault(pde_t*, uint);
 
 int             vm_numvp(struct proc*);
 int             vm_numpp(struct proc*);
 int             vm_getptsize(struct proc*);
+int             vm_pageref(pde_t*, uint);
 
 int             deallocuvm(pde_t*, uint, uint);
 void            freevm(pde_t*);

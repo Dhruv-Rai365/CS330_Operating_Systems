@@ -112,6 +112,7 @@ extern int sys_mprotect(void);
 extern int sys_numvp(void);
 extern int sys_numpp(void);
 extern int sys_getptsize(void);
+extern int sys_pageref(void);
 
 static int (*syscalls[])(void) = {
 [SYS_fork]    sys_fork,
@@ -144,6 +145,7 @@ static int (*syscalls[])(void) = {
 [SYS_numvp]       sys_numvp,
 [SYS_numpp]       sys_numpp,
 [SYS_getptsize]   sys_getptsize,
+[SYS_pageref]     sys_pageref,
 };
 
 static char *syscall_names[] = {
@@ -176,7 +178,8 @@ static char *syscall_names[] = {
   [SYS_mprotect]  "mprotect",
   [SYS_numvp]       "numvp",
   [SYS_numpp]       "numpp",
-  [SYS_getptsize]   "getptsize"
+  [SYS_getptsize]   "getptsize",
+  [SYS_pageref]     "pageref",
 };
 
 void

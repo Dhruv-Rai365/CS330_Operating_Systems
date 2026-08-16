@@ -29,3 +29,4 @@
 #define SYS_numvp       28
 #define SYS_numpp       29
 #define SYS_getptsize   30
+#define SYS_pageref     31

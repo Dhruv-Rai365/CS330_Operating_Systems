@@ -189,6 +189,7 @@ UPROGS=\
 	_sched_bench\
 	_mmap_test\
 	_mmap_sanity\
+	_cow_test\
 
 fs.img: mkfs README $(UPROGS)
 	./mkfs fs.img README $(UPROGS)

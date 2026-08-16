@@ -371,3 +371,22 @@ sys_getptsize(void)
   return vm_getptsize(myproc());
 }
 
+/*
+ * pageref(va)
+ *
+ * Diagnostic syscall used to inspect the physical-frame
+ * reference count for one user virtual address.
+ */
+int
+sys_pageref(void)
+{
+  int addr;
+
+  if(argint(0, &addr) < 0)
+    return -1;
+
+  if((uint)addr >= KERNBASE)
+    return -1;
+
+  return vm_pageref(myproc()->pgdir, (uint)addr);
+}

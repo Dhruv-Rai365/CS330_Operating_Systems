@@ -32,6 +32,7 @@ int mprotect(void*, int, int);
 int numvp(void);
 int numpp(void);
 int getptsize(void);
+int pageref(void*);
 
 // ulib.c
 int stat(const char*, struct stat*);

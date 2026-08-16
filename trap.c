@@ -56,88 +56,182 @@ trap(struct trapframe *tf)
     }
     lapiceoi();
     break;
-  case T_PGFLT:
-  {
-    uint faultva;
-    uint pageva;
-    struct proc *p;
-    struct vma *v;
+    
+    case T_PGFLT:
+    {
+      uint faultva;
+      uint pageva;
+      struct proc *p;
+      struct vma *v;
+      int cowresult;
 
-    /*
-     * CR2 contains the virtual address that caused
-     * the x86 page fault.
-     */
-    faultva = rcr2();
-    pageva = PGROUNDDOWN(faultva);
-    p = myproc();
-
-    if(p == 0){
-      cprintf("page fault without process at 0x%x\n", faultva);
-      panic("page fault");
-    }
-
-    /*
-     * The fault is valid only if the address was previously
-     * reserved by mmap().
-     */
-    v = vma_find(p, faultva);
-
-    if(v == 0){
       /*
-       * Preserve xv6's normal behaviour for genuine kernel
-       * faults.  Invalid user accesses simply kill the process.
+       * x86 stores the virtual address responsible for the
+       * page fault in CR2.
        */
-      if((tf->cs & 3) == 0){
-        cprintf("kernel page fault at 0x%x\n", faultva);
+      faultva = rcr2();
+      pageva = PGROUNDDOWN(faultva);
+      p = myproc();
+
+      if(p == 0){
+        cprintf("page fault without process at 0x%x\n", faultva);
         panic("page fault");
       }
 
-      cprintf("pid %d: invalid memory access at 0x%x\n",
-              p->pid, faultva);
+      /*
+       * Find mmap metadata if this fault lies inside one of our
+       * anonymous mappings.
+       *
+       * Ordinary stack/heap/code pages will have v == 0.
+       */
+      v = vma_find(p, faultva);
 
-      p->killed = 1;
+
+      /*
+       * ----------------------------------------------------
+       * CASE 1: PRESENT + WRITE fault
+       * ----------------------------------------------------
+       *
+       * x86 page-fault error-code:
+       *
+       * bit 0 = 1 -> page was present; protection was violated
+       * bit 1 = 1 -> faulting access was a write
+       *
+       * Therefore low bits == 11b means a write-protection fault.
+       */
+      if((tf->err & 0x3) == 0x3){
+
+        /*
+         * If mmap metadata explicitly says the region is
+         * read-only, this is a genuine mprotect violation.
+         *
+         * Even if the underlying PTE happens to still carry a
+         * COW marker, mprotect(PROT_READ) wins.
+         */
+        if(v != 0 && !(v->prot & PROT_WRITE)){
+          cprintf("pid %d: write to read-only mapping at 0x%x\n",
+                  p->pid, faultva);
+
+          p->killed = 1;
+          break;
+        }
+
+        /*
+         * Otherwise ask the VM layer whether this is a genuine
+         * COW page.
+         */
+        cowresult = cow_fault(p->pgdir, pageva);
+
+        if(cowresult == 1){
+          /*
+           * Private writable mapping is now ready.
+           *
+           * Returning from the trap retries the original write.
+           */
+          break;
+        }
+
+        if(cowresult < 0){
+          cprintf("pid %d: COW allocation failed at 0x%x\n",
+                  p->pid, faultva);
+
+          p->killed = 1;
+          break;
+        }
+
+        /*
+         * Present + write fault, but it wasn't COW.
+         * This is an ordinary protection violation.
+         */
+        if((tf->cs & 3) == 0){
+          cprintf("kernel protection fault at 0x%x\n", faultva);
+          panic("page fault");
+        }
+
+        cprintf("pid %d: protection fault at 0x%x\n",
+                p->pid, faultva);
+
+        p->killed = 1;
+        break;
+      }
+
+
+      /*
+       * ----------------------------------------------------
+       * CASE 2: some other protection violation
+       * ----------------------------------------------------
+       *
+       * Present bit set, but not the COW-write combination.
+       */
+      if(tf->err & 0x1){
+
+        if((tf->cs & 3) == 0){
+          cprintf("kernel page protection fault at 0x%x\n",
+                  faultva);
+          panic("page fault");
+        }
+
+        cprintf("pid %d: protection fault at 0x%x\n",
+                p->pid, faultva);
+
+        p->killed = 1;
+        break;
+      }
+
+
+      /*
+       * ----------------------------------------------------
+       * CASE 3: NOT-PRESENT page
+       * ----------------------------------------------------
+       *
+       * This is our existing demand-paged mmap path.
+       */
+      if(v == 0){
+
+        if((tf->cs & 3) == 0){
+          cprintf("kernel page fault at 0x%x\n", faultva);
+          panic("page fault");
+        }
+
+        cprintf("pid %d: invalid memory access at 0x%x\n",
+                p->pid, faultva);
+
+        p->killed = 1;
+        break;
+      }
+
+
+      /*
+       * A first access may itself be a write.
+       *
+       * A read-only VMA must not allocate a writable page just
+       * because the page does not exist yet.
+       */
+      if((tf->err & 0x2) && !(v->prot & PROT_WRITE)){
+        cprintf("pid %d: write to read-only mapping at 0x%x\n",
+                p->pid, faultva);
+
+        p->killed = 1;
+        break;
+      }
+
+
+      /*
+       * Valid lazy mmap page:
+       *
+       * allocate one zero-filled frame and install its PTE with
+       * permissions determined by the VMA.
+       */
+      if(vm_alloc_mmap_page(p->pgdir,
+                            pageva,
+                            v->prot) < 0){
+        cprintf("pid %d: mmap page allocation failed\n", p->pid);
+        p->killed = 1;
+        break;
+      }
+
       break;
     }
-
-    /*
-     * Error-code bit 0 == 1 means the page was already present.
-     * Therefore this is a protection fault rather than a
-     * demand-allocation fault.
-     *
-     * Later, Copy-on-Write will make use of this distinction.
-     */
-    if(tf->err & 0x1){
-      cprintf("pid %d: protection fault at 0x%x\n",
-              p->pid, faultva);
-
-      p->killed = 1;
-      break;
-    }
-
-    /*
-     * Error-code bit 1 == 1 means the faulting access was a write.
-     * A write must not create a page inside a read-only VMA.
-     */
-    if((tf->err & 0x2) && !(v->prot & PROT_WRITE)){
-      cprintf("pid %d: write to read-only mapping at 0x%x\n",
-              p->pid, faultva);
-
-      p->killed = 1;
-      break;
-    }
-
-    /*
-     * Valid non-present mmap page:
-     * allocate one zero-filled physical page and install its PTE.
-     */
-    if(vm_alloc_mmap_page(p->pgdir, pageva, v->prot) < 0){
-      cprintf("pid %d: mmap page allocation failed\n", p->pid);
-      p->killed = 1;
-      break;
-    }
-
-    break;
-  }
   case T_IRQ0 + IRQ_IDE:
     ideintr();
     lapiceoi();
